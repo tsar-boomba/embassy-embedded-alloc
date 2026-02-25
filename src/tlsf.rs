@@ -3,7 +3,8 @@ use core::cell::RefCell;
 use core::ptr::{self, NonNull};
 
 use const_default::ConstDefault;
-use critical_section::Mutex;
+use embassy_sync::blocking_mutex::raw::RawMutex;
+use embassy_sync::blocking_mutex::Mutex;
 use rlsf::Tlsf;
 
 type TlsfHeap = Tlsf<'static, usize, usize, { usize::BITS as usize }, { usize::BITS as usize }>;
@@ -20,16 +21,16 @@ unsafe impl Sync for Inner {}
 unsafe impl Send for Inner {}
 
 /// A two-Level segregated fit heap.
-pub struct Heap {
-    heap: Mutex<RefCell<Inner>>,
+pub struct Heap<R: RawMutex> {
+    heap: Mutex<R, RefCell<Inner>>,
 }
 
-impl Heap {
+impl<R: RawMutex> Heap<R> {
     /// Create a new UNINITIALIZED heap allocator
     ///
     /// You must initialize this heap using the
     /// [`init`](Self::init) method before using the allocator.
-    pub const fn empty() -> Heap {
+    pub const fn empty() -> Self {
         Heap {
             heap: Mutex::new(RefCell::new(Inner {
                 tlsf: ConstDefault::DEFAULT,
@@ -73,8 +74,8 @@ impl Heap {
     /// - `size`, after aligning start and end to `rlsf::GRANULARITY`, is smaller than `rlsf::GRANULARITY * 2`.
     pub unsafe fn init(&self, start_addr: usize, size: usize) {
         assert!(size > 0);
-        critical_section::with(|cs| {
-            let mut heap = self.heap.borrow_ref_mut(cs);
+        self.heap.lock(|heap| {
+            let mut heap = heap.borrow_mut();
             assert!(!heap.initialized);
             let block: NonNull<[u8]> =
                 NonNull::slice_from_raw_parts(NonNull::new_unchecked(start_addr as *mut u8), size);
@@ -92,13 +93,12 @@ impl Heap {
     }
 
     fn alloc(&self, layout: Layout) -> Option<NonNull<u8>> {
-        critical_section::with(|cs| self.heap.borrow_ref_mut(cs).tlsf.allocate(layout))
+        self.heap.lock(|h| h.borrow_mut().tlsf.allocate(layout))
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        critical_section::with(|cs| {
-            self.heap
-                .borrow_ref_mut(cs)
+        self.heap.lock(|heap| {
+            heap.borrow_mut()
                 .tlsf
                 .deallocate(NonNull::new_unchecked(ptr), layout.align())
         })
@@ -106,19 +106,19 @@ impl Heap {
 
     /// Get the amount of bytes used by the allocator.
     pub fn used(&self) -> usize {
-        critical_section::with(|cs| {
-            let free = self.free_with_cs(cs);
-            self.heap.borrow_ref_mut(cs).raw_block_size - free
+        self.heap.lock(|h| {
+            let free = self.free_with_lock(h);
+            h.borrow_mut().raw_block_size - free
         })
     }
 
     /// Get the amount of free bytes in the allocator.
     pub fn free(&self) -> usize {
-        critical_section::with(|cs| self.free_with_cs(cs))
+        self.heap.lock(|h| self.free_with_lock(h))
     }
 
-    fn free_with_cs(&self, cs: critical_section::CriticalSection) -> usize {
-        let inner_mut = self.heap.borrow_ref_mut(cs);
+    fn free_with_lock(&self, heap: &RefCell<Inner>) -> usize {
+        let inner_mut = heap.borrow_mut();
         if !inner_mut.initialized {
             return 0;
         }
@@ -135,7 +135,7 @@ impl Heap {
     }
 }
 
-unsafe impl GlobalAlloc for Heap {
+unsafe impl<R: RawMutex> GlobalAlloc for Heap<R> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         self.alloc(layout)
             .map_or(ptr::null_mut(), |allocation| allocation.as_ptr())

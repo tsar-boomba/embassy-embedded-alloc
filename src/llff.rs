@@ -2,20 +2,21 @@ use core::alloc::{GlobalAlloc, Layout};
 use core::cell::RefCell;
 use core::ptr::{self, NonNull};
 
-use critical_section::Mutex;
+use embassy_sync::blocking_mutex::raw::RawMutex;
+use embassy_sync::blocking_mutex::Mutex;
 use linked_list_allocator::Heap as LLHeap;
 
 /// A linked list first fit heap.
-pub struct Heap {
-    heap: Mutex<RefCell<(LLHeap, bool)>>,
+pub struct Heap<R: RawMutex> {
+    heap: Mutex<R, RefCell<(LLHeap, bool)>>,
 }
 
-impl Heap {
+impl<R: RawMutex> Heap<R> {
     /// Create a new UNINITIALIZED heap allocator
     ///
     /// You must initialize this heap using the
     /// [`init`](Self::init) method before using the allocator.
-    pub const fn empty() -> Heap {
+    pub const fn empty() -> Self {
         Heap {
             heap: Mutex::new(RefCell::new((LLHeap::empty(), false))),
         }
@@ -54,8 +55,8 @@ impl Heap {
     /// - `size == 0`.
     pub unsafe fn init(&self, start_addr: usize, size: usize) {
         assert!(size > 0);
-        critical_section::with(|cs| {
-            let mut heap = self.heap.borrow_ref_mut(cs);
+        self.heap.lock(|h| {
+            let mut heap = h.borrow_mut();
             assert!(!heap.1);
             heap.1 = true;
             heap.0.init(start_addr as *mut u8, size);
@@ -64,35 +65,29 @@ impl Heap {
 
     /// Returns an estimate of the amount of bytes in use.
     pub fn used(&self) -> usize {
-        critical_section::with(|cs| self.heap.borrow_ref_mut(cs).0.used())
+        self.heap.lock(|h| h.borrow_mut().0.used())
     }
 
     /// Returns an estimate of the amount of bytes available.
     pub fn free(&self) -> usize {
-        critical_section::with(|cs| self.heap.borrow_ref_mut(cs).0.free())
+        self.heap.lock(|h| h.borrow_mut().0.free())
     }
 
     fn alloc(&self, layout: Layout) -> Option<NonNull<u8>> {
-        critical_section::with(|cs| {
-            self.heap
-                .borrow_ref_mut(cs)
-                .0
-                .allocate_first_fit(layout)
-                .ok()
-        })
+        self.heap
+            .lock(|h| h.borrow_mut().0.allocate_first_fit(layout).ok())
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        critical_section::with(|cs| {
-            self.heap
-                .borrow_ref_mut(cs)
+        self.heap.lock(|h| {
+            h.borrow_mut()
                 .0
                 .deallocate(NonNull::new_unchecked(ptr), layout)
         });
     }
 }
 
-unsafe impl GlobalAlloc for Heap {
+unsafe impl<R: RawMutex> GlobalAlloc for Heap<R> {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         self.alloc(layout)
             .map_or(ptr::null_mut(), |allocation| allocation.as_ptr())
