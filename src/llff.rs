@@ -1,5 +1,4 @@
 use core::alloc::{GlobalAlloc, Layout};
-use core::cell::RefCell;
 use core::ptr::{self, NonNull};
 
 use embassy_sync::blocking_mutex::raw::RawMutex;
@@ -8,7 +7,7 @@ use linked_list_allocator::Heap as LLHeap;
 
 /// A linked list first fit heap.
 pub struct Heap<R: RawMutex> {
-    heap: Mutex<R, RefCell<(LLHeap, bool)>>,
+    heap: Mutex<R, (LLHeap, bool)>,
 }
 
 impl<R: RawMutex> Heap<R> {
@@ -18,7 +17,7 @@ impl<R: RawMutex> Heap<R> {
     /// [`init`](Self::init) method before using the allocator.
     pub const fn empty() -> Self {
         Heap {
-            heap: Mutex::new(RefCell::new((LLHeap::empty(), false))),
+            heap: Mutex::new((LLHeap::empty(), false)),
         }
     }
 
@@ -55,8 +54,7 @@ impl<R: RawMutex> Heap<R> {
     /// - `size == 0`.
     pub unsafe fn init(&self, start_addr: usize, size: usize) {
         assert!(size > 0);
-        self.heap.lock(|h| {
-            let mut heap = h.borrow_mut();
+        self.heap.lock_mut(|heap| {
             assert!(!heap.1);
             heap.1 = true;
             heap.0.init(start_addr as *mut u8, size);
@@ -65,22 +63,22 @@ impl<R: RawMutex> Heap<R> {
 
     /// Returns an estimate of the amount of bytes in use.
     pub fn used(&self) -> usize {
-        self.heap.lock(|h| h.borrow_mut().0.used())
+        unsafe { self.heap.lock_mut(|h| h.0.used()) }
     }
 
     /// Returns an estimate of the amount of bytes available.
     pub fn free(&self) -> usize {
-        self.heap.lock(|h| h.borrow_mut().0.free())
+        unsafe { self.heap.lock_mut(|h| h.0.free()) }
     }
 
     fn alloc(&self, layout: Layout) -> Option<NonNull<u8>> {
-        self.heap
-            .lock(|h| h.borrow_mut().0.allocate_first_fit(layout).ok())
+        unsafe { self.heap
+                    .lock_mut(|h| h.0.allocate_first_fit(layout).ok()) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        self.heap.lock(|h| {
-            h.borrow_mut()
+        self.heap.lock_mut(|h| {
+            h
                 .0
                 .deallocate(NonNull::new_unchecked(ptr), layout)
         });

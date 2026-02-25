@@ -7,13 +7,14 @@ use cortex_m as _;
 use cortex_m_rt::entry;
 use defmt::Debug2Format;
 use defmt_semihosting as _;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 
 use core::{mem::MaybeUninit, panic::PanicInfo};
 use embedded_alloc::TlsfHeap as Heap;
 //use embedded_alloc::LlffHeap as Heap;
 
 #[global_allocator]
-static HEAP: Heap = Heap::empty();
+static HEAP: Heap<CriticalSectionRawMutex> = Heap::empty();
 
 #[entry]
 fn main() -> ! {

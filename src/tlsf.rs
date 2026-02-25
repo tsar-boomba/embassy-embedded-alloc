@@ -1,5 +1,4 @@
 use core::alloc::{GlobalAlloc, Layout};
-use core::cell::RefCell;
 use core::ptr::{self, NonNull};
 
 use const_default::ConstDefault;
@@ -22,7 +21,7 @@ unsafe impl Send for Inner {}
 
 /// A two-Level segregated fit heap.
 pub struct Heap<R: RawMutex> {
-    heap: Mutex<R, RefCell<Inner>>,
+    heap: Mutex<R, Inner>,
 }
 
 impl<R: RawMutex> Heap<R> {
@@ -32,12 +31,12 @@ impl<R: RawMutex> Heap<R> {
     /// [`init`](Self::init) method before using the allocator.
     pub const fn empty() -> Self {
         Heap {
-            heap: Mutex::new(RefCell::new(Inner {
+            heap: Mutex::new(Inner {
                 tlsf: ConstDefault::DEFAULT,
                 initialized: false,
                 raw_block: None,
                 raw_block_size: 0,
-            })),
+            }),
         }
     }
 
@@ -74,51 +73,54 @@ impl<R: RawMutex> Heap<R> {
     /// - `size`, after aligning start and end to `rlsf::GRANULARITY`, is smaller than `rlsf::GRANULARITY * 2`.
     pub unsafe fn init(&self, start_addr: usize, size: usize) {
         assert!(size > 0);
-        self.heap.lock(|heap| {
-            let mut heap = heap.borrow_mut();
-            assert!(!heap.initialized);
-            let block: NonNull<[u8]> =
-                NonNull::slice_from_raw_parts(NonNull::new_unchecked(start_addr as *mut u8), size);
-            let Some(actual_size) = heap.tlsf.insert_free_block_ptr(block) else {
-                panic!("Allocation too small for heap");
-            };
-            let block: NonNull<[u8]> = NonNull::slice_from_raw_parts(
-                NonNull::new_unchecked(start_addr as *mut u8),
-                actual_size.get(),
-            );
-            heap.initialized = true;
-            heap.raw_block = Some(block);
-            heap.raw_block_size = size;
-        });
+        unsafe {
+            self.heap.lock_mut(|heap| {
+                assert!(!heap.initialized);
+                let block: NonNull<[u8]> = NonNull::slice_from_raw_parts(
+                    NonNull::new_unchecked(start_addr as *mut u8),
+                    size,
+                );
+                let Some(actual_size) = heap.tlsf.insert_free_block_ptr(block) else {
+                    panic!("Allocation too small for heap");
+                };
+                let block: NonNull<[u8]> = NonNull::slice_from_raw_parts(
+                    NonNull::new_unchecked(start_addr as *mut u8),
+                    actual_size.get(),
+                );
+                heap.initialized = true;
+                heap.raw_block = Some(block);
+                heap.raw_block_size = size;
+            })
+        };
     }
 
     fn alloc(&self, layout: Layout) -> Option<NonNull<u8>> {
-        self.heap.lock(|h| h.borrow_mut().tlsf.allocate(layout))
+        unsafe { self.heap.lock_mut(|h| h.tlsf.allocate(layout)) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        self.heap.lock(|heap| {
-            heap.borrow_mut()
-                .tlsf
+        self.heap.lock_mut(|heap| {
+            heap.tlsf
                 .deallocate(NonNull::new_unchecked(ptr), layout.align())
         })
     }
 
     /// Get the amount of bytes used by the allocator.
     pub fn used(&self) -> usize {
-        self.heap.lock(|h| {
-            let free = self.free_with_lock(h);
-            h.borrow_mut().raw_block_size - free
-        })
+        unsafe {
+            self.heap.lock_mut(|h| {
+                let free = self.free_with_inner(h);
+                h.raw_block_size - free
+            })
+        }
     }
 
     /// Get the amount of free bytes in the allocator.
     pub fn free(&self) -> usize {
-        self.heap.lock(|h| self.free_with_lock(h))
+        unsafe { self.heap.lock_mut(|h| self.free_with_inner(h)) }
     }
 
-    fn free_with_lock(&self, heap: &RefCell<Inner>) -> usize {
-        let inner_mut = heap.borrow_mut();
+    fn free_with_inner(&self, inner_mut: &mut Inner) -> usize {
         if !inner_mut.initialized {
             return 0;
         }
