@@ -120,6 +120,23 @@ impl<R: RawMutex> Heap<R> {
         unsafe { self.heap.lock_mut(|h| self.free_with_inner(h)) }
     }
 
+    /// Get the size of the largest free block. Walks every block.
+    pub fn largest_free(&self) -> usize {
+        unsafe {
+            self.heap.lock_mut(|h| {
+                if !h.initialized {
+                    return 0;
+                }
+                h.tlsf
+                    .iter_blocks(h.raw_block.unwrap())
+                    .filter(|block_info| !block_info.is_occupied())
+                    .map(|block_info| block_info.max_payload_size())
+                    .max()
+                    .unwrap_or(0)
+            })
+        }
+    }
+
     fn free_with_inner(&self, inner_mut: &mut Inner) -> usize {
         if !inner_mut.initialized {
             return 0;
