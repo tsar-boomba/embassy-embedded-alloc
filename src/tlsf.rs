@@ -163,6 +163,13 @@ unsafe impl<R: RawMutex> GlobalAlloc for Heap<R> {
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         self.dealloc(ptr, layout)
     }
+
+    /// Grows or shrinks in place when it can. A move copies under the lock.
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let new_layout = Layout::from_size_align_unchecked(new_size, layout.align());
+        self.heap.lock_mut(|h| h.tlsf.reallocate(NonNull::new_unchecked(ptr), new_layout))
+            .map_or(ptr::null_mut(), NonNull::as_ptr)
+    }
 }
 
 #[cfg(feature = "allocator_api")]
